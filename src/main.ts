@@ -6,7 +6,7 @@ import App from './App.vue'
 import router from './router'
 import { createApiService } from './services/api'
 
-// Create the API service with router
+// Create the API service
 const apiService = createApiService()
 
 // Create Vue application instance

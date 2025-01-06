@@ -1,11 +1,13 @@
-// src/stores/useAuthStore.ts
-import { defineStore } from 'pinia';
-import axios from 'axios';
+import { defineStore } from 'pinia'
+import axios from 'axios'
+import { createApiService } from '@/services/api'
+import type { AuthResponse, RegisterRequest, User } from '@/types/auth'
+import router from '@/router'
 
 interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
-  user: never | null;
+  user: User | null;
   loading: boolean;
   error: string | null;
 }
@@ -45,6 +47,24 @@ export const useAuthStore = defineStore('auth', {
         return true;
       } catch (error) {
         this.error = 'Login failed. Please check your credentials.';
+        throw error;
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async register(userData: RegisterRequest) {
+      try {
+        this.loading = true;
+        this.error = null;
+
+        const api = createApiService();
+        const { data } = await api.instance.post<AuthResponse>('/auth/register', userData);
+
+        this.handleAuthSuccess(data);
+        return true;
+      } catch (error) {
+        this.error = 'Register failed. Please check user data and try again.';
         throw error;
       } finally {
         this.loading = false;
@@ -95,6 +115,14 @@ export const useAuthStore = defineStore('auth', {
     logout() {
       this.setTokens(null, null);
       this.user = null;
+      router.push('/login');
+    },
+
+    handleAuthSuccess(response: AuthResponse) {
+      this.accessToken = response.accessToken;
+      this.refreshToken = response.refreshToken;
+      this.user = response.user;
+      localStorage.setItem('accessToken', response.accessToken);
     }
   }
 });

@@ -1,15 +1,18 @@
-import axios, { type AxiosInstance } from 'axios';
-import { useAuthStore } from '@/stores/useAuthStore';
-import router from '@/router'
+import axios, { type AxiosInstance, AxiosError } from 'axios'
+import { useAuthStore } from '@/stores/useAuthStore'
+import { useNotifications } from '@/composables/useNotification'
+import { config } from '@/config/env';
 
 class ApiService {
   private readonly api: AxiosInstance;
   private isRefreshing = false;
-  private refreshSubscribers: ((token: string) => void)[] = [];
+  private refreshSubscribers: Array<(token: string) => void> = [];
+  private notifications = useNotifications();
 
   constructor() {
     this.api = axios.create({
-      baseURL: 'http://localhost:8080/api',
+      baseURL: config.apiUrl,
+      timeout: config.timeout,
       headers: {
         'Content-Type': 'application/json'
       }
@@ -19,7 +22,7 @@ class ApiService {
   }
 
   private setupInterceptors() {
-    // Request interceptor - adds token to requests
+    // Request interceptor
     this.api.interceptors.request.use(
       (config) => {
         const authStore = useAuthStore();
@@ -29,21 +32,33 @@ class ApiService {
           config.headers.Authorization = `Bearer ${token}`;
         }
 
+        // Add request ID for tracking concurrent requests
+        config.headers['X-Request-ID'] = Date.now().toString();
+
         return config;
       },
-      (error) => Promise.reject(error)
+      (error) => Promise.reject(this.handleError(error))
     );
 
-    // Response interceptor - handles token refresh
+    // Response interceptor
     this.api.interceptors.response.use(
       (response) => response,
       async (error) => {
         const originalRequest = error.config;
 
-        // If error is 401 and we haven't tried to refresh token yet
+        // Handle timeout errors
+        if (error.code === 'ECONNABORTED') {
+          this.notifications.addNotification(
+            'Request timed out. Please try again.',
+            'error'
+          );
+          return Promise.reject(error);
+        }
+
+        // Handle token refresh
         if (error.response?.status === 401 && !originalRequest._retry) {
           if (this.isRefreshing) {
-            // If already refreshing, wait for new token
+            // Queue the request if we're already refreshing
             return new Promise(resolve => {
               this.refreshSubscribers.push((token: string) => {
                 originalRequest.headers.Authorization = `Bearer ${token}`;
@@ -59,25 +74,59 @@ class ApiService {
             const authStore = useAuthStore();
             const newToken = await authStore.refreshAccessToken();
 
-            this.refreshSubscribers.forEach(callback => callback(newToken));
-            this.refreshSubscribers = [];
+            // Process queued requests with new token
+            this.processQueue(newToken);
 
             originalRequest.headers.Authorization = `Bearer ${newToken}`;
             return this.api(originalRequest);
           } catch (refreshError) {
-            // If refresh fails, redirect to login
+            this.processQueue(null);
             const authStore = useAuthStore();
             authStore.logout();
-            router.push('/login');
+            this.notifications.addNotification(
+              'Session expired. Please log in again.',
+              'warning'
+            );
             return Promise.reject(refreshError);
           } finally {
             this.isRefreshing = false;
           }
         }
 
-        return Promise.reject(error);
+        return Promise.reject(this.handleError(error));
       }
     );
+  }
+
+  private handleError(error: AxiosError) {
+    let message = 'An unexpected error occurred';
+
+    if (error.response) {
+      // Server responded with error
+      const status = error.response.status;
+      if (status === 404) {
+        message = 'Resource not found';
+      } else if (status === 403) {
+        message = 'You don\'t have permission to access this resource';
+      } else if (status === 422) {
+        message = 'Invalid data provided';
+      }
+    } else if (error.request) {
+      // Request made but no response
+      message = 'Server is not responding';
+    }
+
+    this.notifications.addNotification(message, 'error');
+    return error;
+  }
+
+  private processQueue(token: string | null) {
+    this.refreshSubscribers.forEach(callback => {
+      if (token) {
+        callback(token);
+      }
+    });
+    this.refreshSubscribers = [];
   }
 
   public get instance(): AxiosInstance {
